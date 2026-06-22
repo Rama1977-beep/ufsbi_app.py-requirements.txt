@@ -8,13 +8,13 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
-st.set_page_config(page_title="UFSBI Expert Analyzer V2", layout="wide")
+st.set_page_config(page_title="UFSBI Expert Analyzer V2.1", layout="wide")
 
 EXPERT_SEQUENCE = [
     [1, "Line Clear Initiating", "BPNR", "UP", "BPNR not pickup: check bell button contact and SM key."],
     [2, "Line Clear Initiating", "TGTNR", "UP", "TGTNR not pickup: check TGT button and CNR relay contact D7/D8."],
     [3, "Line Clear Initiating", "TGTXR", "UP", "TGTXR not pickup: check TGTR drop A7/A8, BPNR B1/N2, TGTNR A1/A2, ASGNCR A1/A2, DAZTR B1/B2, 24V fuse."],
-    [4, "Line Clear Link", "TGTYR", "UP", "TGTYR not pickup: link response not received. If BIPR/FR relays indicate link failure, inform Telecom."],
+    [4, "Line Clear Link", "TGTYR", "UP", "TGTYR not pickup: check TGTYR R1/R2. If BIPR/BPR down, inform Telecom."],
     [5, "Train On Line Prep", "HSGNCR", "DOWN", "HSGNCR not drop: check HSGNCR drop path."],
     [6, "Train On Line Prep", "HSATPR", "DOWN", "HSATPR not drop: check HSATPR drop proving."],
     [7, "Train On Line Prep", "TAR1", "UP", "TAR1 not pickup/hold: check HSATPR A7/A8, TAR1 A2/A1, HSBTPR D2/D1, TCFR A3/A4, TAR2 D5/D6."],
@@ -99,10 +99,11 @@ def detect_columns(df):
 
 def extract_events(df):
     rc, sc, tc = detect_columns(df)
-    events = []
 
     if rc is None or sc is None:
         raise Exception("Relay/Status column detect नहीं हुआ.")
+
+    events = []
 
     for i, row in df.iterrows():
         relay = clean_relay(row[rc])
@@ -133,51 +134,43 @@ def find_event(events, relay, status, start):
 
 def detect_link_failure(events):
     """
-    Field logic:
-    Link Error / Communication Failure is Telecom side.
-    No relay contact checking required for link error.
+    Corrected Link Error Logic:
+    B1PR1 / B1PR2 are NOT communication failure relays.
+    Link Error only if exact BIPR1/BIPR2 or BPR1/BPR2 DOWN found.
+    FR1/FR2 are supporting indication only.
     """
 
-    bipr1_down = has_event(events, "BIPR1", "DOWN") or has_event(events, "B1PR1", "DOWN")
-    bipr2_down = has_event(events, "BIPR2", "DOWN") or has_event(events, "B1PR2", "DOWN")
+    bipr1_down = has_event(events, "BIPR1", "DOWN") or has_event(events, "BPR1", "DOWN")
+    bipr2_down = has_event(events, "BIPR2", "DOWN") or has_event(events, "BPR2", "DOWN")
 
     fr1_down = has_event(events, "FR1", "DOWN")
     fr2_down = has_event(events, "FR2", "DOWN")
 
     tgtxr_up = has_event(events, "TGTXR", "UP")
     tgtyr_down = has_event(events, "TGTYR", "DOWN")
-    tgtyr_missing = not has_event(events, "TGTYR", "UP")
+
+    if bipr1_down and bipr2_down and fr1_down and fr2_down:
+        return {
+            "failure_type": "COMPLETE UFSBI COMMUNICATION FAILURE",
+            "department": "TELECOM",
+            "reason": "BIPR/BPR and FR1/FR2 found DOWN in Data Logger.",
+            "action": "Inform Telecom. Check OFC/Quad communication, modem, media converter, UFSBI communication cards and telecom path. Relay contact checking not required."
+        }
 
     if bipr1_down and bipr2_down:
         return {
             "failure_type": "LINK ERROR / COMMUNICATION FAILURE",
             "department": "TELECOM",
-            "reason": "BIPR1/BIPR2 found DOWN in Data Logger.",
+            "reason": "BIPR1/BIPR2 or BPR1/BPR2 found DOWN in Data Logger.",
             "action": "Inform Telecom. Check OFC link, modem, quad cable, media converter and telecom network path. Relay contact checking not required."
         }
 
-    if fr1_down and fr2_down and bipr1_down and bipr2_down:
-        return {
-            "failure_type": "COMPLETE UFSBI COMMUNICATION FAILURE",
-            "department": "TELECOM",
-            "reason": "BIPR1/BIPR2 and FR1/FR2 found DOWN.",
-            "action": "Inform Telecom. Check OFC/Quad communication, modem, UFSBI communication cards and telecom path. Relay contact checking not required."
-        }
-
-    if tgtxr_up and tgtyr_down:
+    if tgtxr_up and tgtyr_down and bipr1_down and bipr2_down:
         return {
             "failure_type": "LINK RESPONSE FAILURE",
             "department": "TELECOM",
-            "reason": "TGTXR UP but TGTYR DOWN. Local transmission available but remote response not received.",
+            "reason": "TGTXR UP and TGTYR DOWN with BIPR/BPR DOWN.",
             "action": "Inform Telecom. Check remote station communication, OFC/Quad link and modem. Relay contact checking not required."
-        }
-
-    if tgtxr_up and tgtyr_missing:
-        return {
-            "failure_type": "POSSIBLE LINK RESPONSE FAILURE",
-            "department": "TELECOM",
-            "reason": "TGTXR UP found but TGTYR UP not found in expected log.",
-            "action": "Verify with opposite station. If TGTYR not received, inform Telecom for OFC/Quad/Modem checking."
         }
 
     return None
@@ -221,10 +214,12 @@ def html(rows, cols):
     h = "<table style='border-collapse:collapse;width:100%;font-size:13px'><tr>"
     h += "".join(f"<th style='border:1px solid #aaa;padding:6px;background:#eee'>{c}</th>" for c in cols)
     h += "</tr>"
+
     for r in rows:
         h += "<tr>"
         h += "".join(f"<td style='border:1px solid #aaa;padding:6px;vertical-align:top'>{x}</td>" for x in r)
         h += "</tr>"
+
     h += "</table>"
     return h
 
@@ -242,7 +237,7 @@ def make_pdf(rows, cols, failure, fname, meta):
     styles = getSampleStyleSheet()
     story = []
 
-    story.append(Paragraph("<b>UFSBI Expert Failure Analysis Report V2</b>", styles["Title"]))
+    story.append(Paragraph("<b>UFSBI Expert Failure Analysis Report V2.1</b>", styles["Title"]))
     story.append(Spacer(1, 8))
     story.append(Paragraph(f"<b>Generated:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}", styles["Normal"]))
     story.append(Paragraph(f"<b>File:</b> {fname}", styles["Normal"]))
@@ -283,7 +278,7 @@ def make_pdf(rows, cols, failure, fname, meta):
     buf.seek(0)
     return buf
 
-st.title("UFSBI Expert Analyzer V2")
+st.title("UFSBI Expert Analyzer V2.1")
 st.write("Faulty UFSBI Data Logger Excel upload करें. यह Link Error और Signal Relay Sequence दोनों analyze करेगा.")
 
 file = st.file_uploader("Upload Faulty Excel", type=["xls", "xlsx"])
@@ -301,7 +296,7 @@ if file:
             rows = [[
                 0,
                 "Communication / Link",
-                "BIPR/FR/TGT",
+                "BIPR/BPR/FR",
                 "CHECK",
                 "-",
                 "-",
@@ -331,7 +326,7 @@ if file:
         st.download_button(
             "Download PDF Report",
             pdf,
-            "UFSBI_Expert_Failure_Report_V2.pdf",
+            "UFSBI_Expert_Failure_Report_V2_1.pdf",
             "application/pdf"
         )
 
